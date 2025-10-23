@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::io;
@@ -6,7 +7,9 @@ use std::path::Path;
 #[derive(Debug)]
 struct Options {
     name: Option<String>,
+    name_bytes: Option<Vec<u8>>,
     iname: Option<String>,
+    iname_bytes: Option<Vec<u8>>,
     type_filter: Option<char>, // 'f' or 'd'
 }
 
@@ -29,7 +32,8 @@ fn main() -> io::Result<()> {
         }
     }
 
-    find_recursive(start_path, &opts)?;
+    let mut visited_inodes = HashSet::new();
+    find_recursive(start_path, &opts, &mut visited_inodes)?;
 
     Ok(())
 }
@@ -37,7 +41,9 @@ fn main() -> io::Result<()> {
 fn parse_args(args: &[String]) -> Options {
     let mut opts = Options {
         name: None,
+        name_bytes: None,
         iname: None,
+        iname_bytes: None,
         type_filter: None,
     };
 
@@ -45,11 +51,16 @@ fn parse_args(args: &[String]) -> Options {
     while i < args.len() {
         match args[i].as_str() {
             "-name" if i + 1 < args.len() => {
-                opts.name = Some(args[i + 1].clone());
+                let pattern = args[i + 1].clone();
+                opts.name_bytes = Some(pattern.as_bytes().to_vec());
+                opts.name = Some(pattern);
                 i += 1;
             }
             "-iname" if i + 1 < args.len() => {
-                opts.iname = Some(args[i + 1].clone());
+                let pattern = args[i + 1].clone();
+                let pattern_lower = pattern.to_lowercase();
+                opts.iname_bytes = Some(pattern_lower.as_bytes().to_vec());
+                opts.iname = Some(pattern);
                 i += 1;
             }
             "-type" if i + 1 < args.len() => {
@@ -69,19 +80,33 @@ fn parse_args(args: &[String]) -> Options {
     opts
 }
 
-fn find_recursive(path: &Path, opts: &Options) -> io::Result<()> {
+fn find_recursive(path: &Path, opts: &Options, visited: &mut HashSet<(u64, u64)>) -> io::Result<()> {
     if path.is_dir() {
         for entry in fs::read_dir(path)? {
             let entry = entry?;
             let file_type = entry.file_type()?;
             let path = entry.path();
 
+            // Track visited inodes to avoid symlink loops
+            if file_type.is_symlink() {
+                if let Ok(metadata) = path.metadata() {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::MetadataExt;
+                        let inode = (metadata.dev(), metadata.ino());
+                        if !visited.insert(inode) {
+                            continue; // Already visited, skip
+                        }
+                    }
+                }
+            }
+
             if should_print(&path, &file_type, opts) {
                 println!("{}", path.display());
             }
 
             if file_type.is_dir() {
-                find_recursive(&path, opts)?;
+                find_recursive(&path, opts, visited)?;
             }
         }
     }
@@ -104,15 +129,15 @@ fn should_print_with_metadata(path: &Path, file_type: &fs::FileType, opts: &Opti
     }
 
     // Apply -name filter (AND logic)
-    if let Some(ref pattern) = opts.name {
-        if !matches_glob(path, pattern, false) {
+    if let Some(ref pattern_bytes) = opts.name_bytes {
+        if !matches_glob_bytes(path, pattern_bytes, false) {
             return false;
         }
     }
 
     // Apply -iname filter (AND logic)
-    if let Some(ref pattern) = opts.iname {
-        if !matches_glob(path, pattern, true) {
+    if let Some(ref pattern_bytes) = opts.iname_bytes {
+        if !matches_glob_bytes(path, pattern_bytes, true) {
             return false;
         }
     }
@@ -120,25 +145,19 @@ fn should_print_with_metadata(path: &Path, file_type: &fs::FileType, opts: &Opti
     true
 }
 
-fn matches_glob(path: &Path, pattern: &str, case_insensitive: bool) -> bool {
+fn matches_glob_bytes(path: &Path, pattern_bytes: &[u8], case_insensitive: bool) -> bool {
     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
         if case_insensitive {
-            // Only allocate when case-insensitive matching is needed
-            glob_match_case_insensitive(name, pattern)
+            // Pattern is already lowercased at startup, just lowercase the name
+            let name_lower = name.to_lowercase();
+            glob_match(name_lower.as_bytes(), pattern_bytes)
         } else {
             // Zero allocation for case-sensitive matching
-            glob_match(name.as_bytes(), pattern.as_bytes())
+            glob_match(name.as_bytes(), pattern_bytes)
         }
     } else {
         false
     }
-}
-
-fn glob_match_case_insensitive(name: &str, pattern: &str) -> bool {
-    // Allocate lowercase versions only for case-insensitive matching
-    let name_lower = name.to_lowercase();
-    let pattern_lower = pattern.to_lowercase();
-    glob_match(name_lower.as_bytes(), pattern_lower.as_bytes())
 }
 
 fn glob_match(name: &[u8], pattern: &[u8]) -> bool {
