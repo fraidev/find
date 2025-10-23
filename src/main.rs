@@ -4,14 +4,9 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-#[derive(Debug)]
-struct Options {
-    name: Option<String>,
-    name_bytes: Option<Vec<u8>>,
-    iname: Option<String>,
-    iname_bytes: Option<Vec<u8>>,
-    type_filter: Option<char>, // 'f' or 'd'
-}
+use args::Args;
+
+mod args;
 
 fn main() -> io::Result<()> {
     let args: Vec<String> = env::args().collect();
@@ -22,7 +17,7 @@ fn main() -> io::Result<()> {
     }
 
     let start_path = Path::new(&args[1]);
-    let opts = parse_args(&args[2..]);
+    let opts = args::parse_args(&args[2..]);
 
     // Print the start path if it matches filters
     if let Ok(metadata) = start_path.metadata() {
@@ -38,49 +33,7 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
-fn parse_args(args: &[String]) -> Options {
-    let mut opts = Options {
-        name: None,
-        name_bytes: None,
-        iname: None,
-        iname_bytes: None,
-        type_filter: None,
-    };
-
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-name" if i + 1 < args.len() => {
-                let pattern = args[i + 1].clone();
-                opts.name_bytes = Some(pattern.as_bytes().to_vec());
-                opts.name = Some(pattern);
-                i += 1;
-            }
-            "-iname" if i + 1 < args.len() => {
-                let pattern = args[i + 1].clone();
-                let pattern_lower = pattern.to_lowercase();
-                opts.iname_bytes = Some(pattern_lower.as_bytes().to_vec());
-                opts.iname = Some(pattern);
-                i += 1;
-            }
-            "-type" if i + 1 < args.len() => {
-                let t = args[i + 1].chars().next().unwrap_or('_');
-                if t == 'f' || t == 'd' {
-                    opts.type_filter = Some(t);
-                } else {
-                    eprintln!("find: invalid argument to '-type': {}", args[i + 1]);
-                }
-                i += 1;
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-
-    opts
-}
-
-fn find_recursive(path: &Path, opts: &Options, visited: &mut HashSet<(u64, u64)>) -> io::Result<()> {
+fn find_recursive(path: &Path, args: &Args, visited: &mut HashSet<(u64, u64)>) -> io::Result<()> {
     if path.is_dir() {
         for entry in fs::read_dir(path)? {
             let entry = entry?;
@@ -101,12 +54,12 @@ fn find_recursive(path: &Path, opts: &Options, visited: &mut HashSet<(u64, u64)>
                 }
             }
 
-            if should_print(&path, &file_type, opts) {
+            if should_print(&path, &file_type, args) {
                 println!("{}", path.display());
             }
 
             if file_type.is_dir() {
-                find_recursive(&path, opts, visited)?;
+                find_recursive(&path, args, visited)?;
             }
         }
     }
@@ -114,13 +67,13 @@ fn find_recursive(path: &Path, opts: &Options, visited: &mut HashSet<(u64, u64)>
     Ok(())
 }
 
-fn should_print(path: &Path, file_type: &fs::FileType, opts: &Options) -> bool {
-    should_print_with_metadata(path, file_type, opts)
+fn should_print(path: &Path, file_type: &fs::FileType, args: &Args) -> bool {
+    should_print_with_metadata(path, file_type, args)
 }
 
-fn should_print_with_metadata(path: &Path, file_type: &fs::FileType, opts: &Options) -> bool {
+fn should_print_with_metadata(path: &Path, file_type: &fs::FileType, args: &Args) -> bool {
     // Apply -type filter
-    if let Some(t) = opts.type_filter {
+    if let Some(t) = args.type_filter {
         match t {
             'f' if !file_type.is_file() => return false,
             'd' if !file_type.is_dir() => return false,
@@ -129,14 +82,14 @@ fn should_print_with_metadata(path: &Path, file_type: &fs::FileType, opts: &Opti
     }
 
     // Apply -name filter (AND logic)
-    if let Some(ref pattern_bytes) = opts.name_bytes {
+    if let Some(ref pattern_bytes) = args.name_bytes {
         if !matches_glob_bytes(path, pattern_bytes, false) {
             return false;
         }
     }
 
     // Apply -iname filter (AND logic)
-    if let Some(ref pattern_bytes) = opts.iname_bytes {
+    if let Some(ref pattern_bytes) = args.iname_bytes {
         if !matches_glob_bytes(path, pattern_bytes, true) {
             return false;
         }
